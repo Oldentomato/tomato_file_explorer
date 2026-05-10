@@ -57,7 +57,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ needs.ci.outputs.IMAGE_TAG }}
         with:
-          cmd: yq eval -i '.image.tag = env(IMAGE_TAG)' './file_ex_web/values.yaml'
+          cmd: yq eval -i '.image.tag = env(IMAGE_TAG)' './tomato_file/front/values.yaml'
 
       - name: Commit manifest changes
         env:
@@ -65,7 +65,7 @@ jobs:
         run: |
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-          git add ./file_ex_web/values.yaml
+          git add ./tomato_file/front/values.yaml
           git commit -m "ci: update backend image tag to $IMAGE_TAG" || echo "No changes to commit"
 
       - name: Push commit
