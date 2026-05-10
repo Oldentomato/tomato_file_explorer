@@ -3,3 +3,4 @@ node_modules/
 dist/
 sample-data/
 run_docker_compose.sh
+.cursor/

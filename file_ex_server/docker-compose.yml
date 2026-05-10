@@ -12,7 +12,7 @@ services:
     pull_policy: always
     container_name: file-api
     ports:
-      - "8000:8000"
+      - "1542:8000"
     volumes:
       - ${SAMPLE_DATA_PATH:-./sample-data}:/data
     restart: unless-stopped
