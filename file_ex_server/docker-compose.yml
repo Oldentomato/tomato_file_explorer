@@ -1,0 +1,18 @@
+# 이 파일은 반드시 이 디렉터리(file_ex_server) 안에서 실행하세요:
+#   cd file_ex_server
+#   docker compose pull
+#   docker compose up -d
+#
+# 상위 폴더(file_explorer)에서 작업 중이면 프로젝트 루트의 docker-compose.yml 을 쓰는 편이 안전합니다.
+# (루트에서 -f server1-api/docker-compose.yml 만 쓰면 ./sample-data 가 엉뚱한 경로로 마운트될 수 있음)
+
+services:
+  file-api:
+    image: oldentomato/file-ex-server:1.0.0
+    pull_policy: always
+    container_name: file-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${SAMPLE_DATA_PATH:-./sample-data}:/data
+    restart: unless-stopped
