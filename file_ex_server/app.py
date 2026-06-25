@@ -1,6 +1,9 @@
 import mimetypes
+import secrets
 import shutil
+import time
 from pathlib import Path
+from threading import Lock
 from typing import List
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -32,6 +35,18 @@ class Entry(BaseModel):
 class DirectoryListing(BaseModel):
     current_path: str
     entries: List[Entry]
+
+
+class ShareLinkResponse(BaseModel):
+    token: str
+    expires_at: int
+    expires_in: int
+    download_path: str
+
+
+SHARE_TTL_SECONDS = 300
+_share_links: dict[str, tuple[str, float]] = {}
+_share_lock = Lock()
 
 
 def safe_target_path(relative_path: str) -> Path:
@@ -99,6 +114,37 @@ def guess_media_type(file_path: Path) -> str:
     return mime or "application/octet-stream"
 
 
+def _cleanup_expired_shares() -> None:
+    now = time.time()
+    expired = [token for token, (_, expires_at) in _share_links.items() if expires_at <= now]
+    for token in expired:
+        del _share_links[token]
+
+
+def _resolve_share_token(token: str) -> str:
+    with _share_lock:
+        _cleanup_expired_shares()
+        record = _share_links.get(token)
+        if not record:
+            raise HTTPException(status_code=404, detail="Link expired or not found")
+        path, expires_at = record
+        if time.time() > expires_at:
+            del _share_links[token]
+            raise HTTPException(status_code=404, detail="Link expired or not found")
+        return path
+
+
+def _file_response(target: Path, *, inline: bool = False) -> FileResponse:
+    media_type = guess_media_type(target)
+    disposition = "inline" if inline else "attachment"
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type=media_type,
+        content_disposition_type=disposition,
+    )
+
+
 @app.get("/api/download")
 def download_file(
     path: str = Query(..., description="Relative file path under /data"),
@@ -110,15 +156,45 @@ def download_file(
     if not target.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
 
-    media_type = guess_media_type(target)
-    disposition: str = "inline" if inline else "attachment"
+    return _file_response(target, inline=inline)
 
-    return FileResponse(
-        path=str(target),
-        filename=target.name,
-        media_type=media_type,
-        content_disposition_type=disposition,
+
+@app.post("/api/share", response_model=ShareLinkResponse)
+def create_share_link(
+    path: str = Query(..., description="Relative file path under /data"),
+) -> ShareLinkResponse:
+    target = safe_target_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    token = secrets.token_urlsafe(32)
+    expires_at = time.time() + SHARE_TTL_SECONDS
+    relative_path = str(target.relative_to(ROOT_DIR))
+
+    with _share_lock:
+        _cleanup_expired_shares()
+        _share_links[token] = (relative_path, expires_at)
+
+    return ShareLinkResponse(
+        token=token,
+        expires_at=int(expires_at),
+        expires_in=SHARE_TTL_SECONDS,
+        download_path=f"/api/shared/{token}",
     )
+
+
+@app.get("/api/shared/{token}")
+def download_shared_file(token: str) -> FileResponse:
+    relative_path = _resolve_share_token(token)
+    target = safe_target_path(relative_path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    return _file_response(target, inline=False)
 
 
 @app.delete("/api/delete")

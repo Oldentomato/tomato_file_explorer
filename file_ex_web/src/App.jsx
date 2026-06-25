@@ -243,6 +243,23 @@ function buildDownloadUrl(path, { inline = false } = {}) {
   return `${API_BASE_URL}/api/download?${params.toString()}`;
 }
 
+function buildPublicApiUrl(apiPath) {
+  const normalized = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
+  if (API_BASE_URL) {
+    return `${API_BASE_URL}${normalized}`;
+  }
+  return `${window.location.origin}${normalized}`;
+}
+
+function formatShareExpiry(expiresAt) {
+  return new Date(expiresAt * 1000).toLocaleString("ko-KR", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function formatBytes(bytes) {
   if (!bytes) return "-";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -263,6 +280,34 @@ function triggerBlobDownload(blob, filename) {
   a.rel = "noopener";
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function parseCharset(contentType = "") {
+  const match = contentType.match(/charset=([^;]+)/i);
+  return match?.[1]?.trim().toLowerCase() || "";
+}
+
+function decodeWithFallback(buffer, preferredCharset) {
+  const candidates = [preferredCharset, "utf-8", "euc-kr"].filter(Boolean);
+  const unique = [...new Set(candidates)];
+  const scored = [];
+
+  for (const charset of unique) {
+    try {
+      const decoded = new TextDecoder(charset).decode(buffer);
+      const replacementCount = (decoded.match(/\uFFFD/g) || []).length;
+      scored.push({ decoded, replacementCount });
+    } catch {
+      // Ignore unsupported charset and try the next candidate.
+    }
+  }
+
+  if (scored.length === 0) {
+    return new TextDecoder("utf-8").decode(buffer);
+  }
+
+  scored.sort((a, b) => a.replacementCount - b.replacementCount);
+  return scored[0].decoded;
 }
 
 function PathBreadcrumb({ currentPath, disabled, onNavigate }) {
@@ -299,6 +344,9 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [downloadingPath, setDownloadingPath] = useState(null);
+  const [sharingPath, setSharingPath] = useState(null);
+  const [shareDialog, setShareDialog] = useState(null);
+  const [shareCopied, setShareCopied] = useState(false);
   const [deletingPath, setDeletingPath] = useState(null);
   const [deleteConfirmEntry, setDeleteConfirmEntry] = useState(null);
   const [error, setError] = useState("");
@@ -400,7 +448,9 @@ export default function App() {
           const data = await response.json().catch(() => ({}));
           throw new Error(data.detail || "파일을 불러오지 못했습니다.");
         }
-        const text = await response.text();
+        const buffer = await response.arrayBuffer();
+        const charset = parseCharset(response.headers.get("content-type") || "");
+        const text = decodeWithFallback(buffer, charset);
         if (!cancelled) {
           setPreviewText(text);
         }
@@ -423,12 +473,16 @@ export default function App() {
   }, [preview]);
 
   useEffect(() => {
-    if (!preview && !deleteConfirmEntry) {
+    if (!preview && !deleteConfirmEntry && !shareDialog) {
       return;
     }
 
     function onKeyDown(event) {
       if (event.key !== "Escape") {
+        return;
+      }
+      if (shareDialog) {
+        closeShareDialog();
         return;
       }
       if (deleteConfirmEntry) {
@@ -442,7 +496,7 @@ export default function App() {
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [preview, deleteConfirmEntry]);
+  }, [preview, deleteConfirmEntry, shareDialog]);
 
   async function onUploadChange(event) {
     const files = Array.from(event.target.files || []);
@@ -508,6 +562,50 @@ export default function App() {
     }
   }
 
+  async function createShareLink(entry) {
+    setSharingPath(entry.path);
+    setError("");
+    try {
+      const params = new URLSearchParams({ path: entry.path });
+      const response = await fetch(`${API_BASE_URL}/api/share?${params.toString()}`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || "공유 링크를 만들지 못했습니다.");
+      }
+      const data = await response.json();
+      setShareCopied(false);
+      setShareDialog({
+        entry,
+        url: buildPublicApiUrl(data.download_path),
+        expiresAt: data.expires_at,
+        expiresIn: data.expires_in,
+      });
+    } catch (err) {
+      setError(err.message || "공유 링크 생성 중 오류가 발생했습니다.");
+    } finally {
+      setSharingPath(null);
+    }
+  }
+
+  function closeShareDialog() {
+    setShareDialog(null);
+    setShareCopied(false);
+  }
+
+  async function copyShareLink() {
+    if (!shareDialog?.url) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(shareDialog.url);
+      setShareCopied(true);
+    } catch {
+      setError("링크를 클립보드에 복사하지 못했습니다.");
+    }
+  }
+
   function openPreview(entry) {
     const kind = getPreviewKind(entry.name);
     if (!kind) return;
@@ -515,6 +613,14 @@ export default function App() {
     setPreviewText("");
     setPreviewTextError("");
     setPreviewTextLoading(kind === "text");
+  }
+
+  function handleEntryActivate(entry) {
+    if (entry.is_dir) {
+      setCurrentPath(entry.path);
+      return;
+    }
+    openPreview(entry);
   }
 
   function closePreview() {
@@ -601,40 +707,51 @@ export default function App() {
           entries.map((entry) => {
             const previewKind = entry.is_dir ? null : getPreviewKind(entry.name);
             const iconKind = getEntryIconKind(entry);
+            const isActivatable = entry.is_dir || Boolean(previewKind);
             return (
-              <div key={entry.path} className={`row ${entry.is_dir ? "dir" : "file"}`}>
+              <div
+                key={entry.path}
+                className={`row ${entry.is_dir ? "dir" : "file"}${isActivatable ? " activatable" : ""}`}
+                role={isActivatable ? "button" : undefined}
+                tabIndex={isActivatable ? 0 : undefined}
+                onClick={isActivatable ? () => handleEntryActivate(entry) : undefined}
+                onKeyDown={
+                  isActivatable
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          handleEntryActivate(entry);
+                        }
+                      }
+                    : undefined
+                }
+              >
                 <div className="row-name-wrap">
                   <span className={`entry-icon entry-icon--${iconKind}`}>
                     <EntryIcon kind={iconKind} />
                   </span>
                   <span className="name">{entry.name}</span>
                 </div>
-                <div className="meta-actions">
+                <div className="meta-actions" onClick={(event) => event.stopPropagation()}>
                   <span className="meta">{entry.is_dir ? "폴더" : formatBytes(entry.size)}</span>
                   {entry.is_dir ? (
-                    <>
-                      <button type="button" onClick={() => setCurrentPath(entry.path)}>
-                        열기
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-delete"
-                        disabled={deletingPath === entry.path || loading || uploading}
-                        onClick={() => openDeleteConfirm(entry)}
-                      >
-                        {deletingPath === entry.path ? "삭제 중..." : "삭제"}
-                      </button>
-                    </>
+                    <button
+                      type="button"
+                      className="btn-delete"
+                      disabled={deletingPath === entry.path || loading || uploading}
+                      onClick={() => openDeleteConfirm(entry)}
+                    >
+                      {deletingPath === entry.path ? "삭제 중..." : "삭제"}
+                    </button>
                   ) : (
                     <>
                       <button
                         type="button"
                         className="download-link"
-                        disabled={!previewKind}
-                        title={previewKind ? "미리보기" : "지원하지 않는 형식"}
-                        onClick={() => openPreview(entry)}
+                        disabled={sharingPath === entry.path}
+                        onClick={() => void createShareLink(entry)}
                       >
-                        미리보기
+                        {sharingPath === entry.path ? "만드는 중..." : "공유하기"}
                       </button>
                       <button
                         type="button"
@@ -702,6 +819,39 @@ export default function App() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {shareDialog && (
+        <div className="share-dialog-backdrop" role="presentation" onClick={closeShareDialog}>
+          <div
+            className="share-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="share-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="share-dialog-title" className="share-dialog-title">
+              공유 링크
+            </h2>
+            <p className="share-dialog-body">
+              <strong className="share-dialog-name">{shareDialog.entry.name}</strong> 파일의 임시 다운로드 링크입니다.
+            </p>
+            <p className="share-dialog-expiry">
+              {Math.round(shareDialog.expiresIn / 60)}분 후 만료 ({formatShareExpiry(shareDialog.expiresAt)}까지)
+            </p>
+            <div className="share-dialog-link-row">
+              <input className="share-dialog-input" type="text" readOnly value={shareDialog.url} />
+              <button type="button" className="share-dialog-copy" onClick={() => void copyShareLink()}>
+                {shareCopied ? "복사됨" : "복사"}
+              </button>
+            </div>
+            <div className="share-dialog-actions">
+              <button type="button" className="share-dialog-close" onClick={closeShareDialog}>
+                닫기
+              </button>
             </div>
           </div>
         </div>
