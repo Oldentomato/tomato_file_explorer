@@ -260,6 +260,18 @@ function formatShareExpiry(expiresAt) {
   });
 }
 
+function suggestNewFolderName(existingEntries) {
+  const used = new Set(existingEntries.map((entry) => entry.name));
+  if (!used.has("새폴더")) {
+    return "새폴더";
+  }
+  let n = 2;
+  while (used.has(`새폴더(${n})`)) {
+    n += 1;
+  }
+  return `새폴더(${n})`;
+}
+
 function formatBytes(bytes) {
   if (!bytes) return "-";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -349,6 +361,9 @@ export default function App() {
   const [shareCopied, setShareCopied] = useState(false);
   const [deletingPath, setDeletingPath] = useState(null);
   const [deleteConfirmEntry, setDeleteConfirmEntry] = useState(null);
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState("새폴더");
+  const [mkdirCreating, setMkdirCreating] = useState(false);
   const [error, setError] = useState("");
 
   const [preview, setPreview] = useState(null);
@@ -473,12 +488,16 @@ export default function App() {
   }, [preview]);
 
   useEffect(() => {
-    if (!preview && !deleteConfirmEntry && !shareDialog) {
+    if (!preview && !deleteConfirmEntry && !shareDialog && !mkdirOpen) {
       return;
     }
 
     function onKeyDown(event) {
       if (event.key !== "Escape") {
+        return;
+      }
+      if (mkdirOpen) {
+        closeMkdirDialog();
         return;
       }
       if (shareDialog) {
@@ -496,7 +515,7 @@ export default function App() {
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [preview, deleteConfirmEntry, shareDialog]);
+  }, [preview, deleteConfirmEntry, shareDialog, mkdirOpen]);
 
   async function onUploadChange(event) {
     const files = Array.from(event.target.files || []);
@@ -634,6 +653,50 @@ export default function App() {
     setDeleteConfirmEntry(entry);
   }
 
+  function openMkdirDialog() {
+    setMkdirName(suggestNewFolderName(entries));
+    setMkdirOpen(true);
+    setError("");
+  }
+
+  function closeMkdirDialog() {
+    if (mkdirCreating) {
+      return;
+    }
+    setMkdirOpen(false);
+  }
+
+  async function createFolder() {
+    const name = mkdirName.trim();
+    if (!name) {
+      setError("폴더 이름을 입력하세요.");
+      return;
+    }
+    if (name.includes("/") || name.includes("\\") || name === "." || name === "..") {
+      setError("사용할 수 없는 폴더 이름입니다.");
+      return;
+    }
+
+    setMkdirCreating(true);
+    setError("");
+    try {
+      const params = new URLSearchParams({ path: currentPath, name });
+      const response = await fetch(`${API_BASE_URL}/api/mkdir?${params.toString()}`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || "폴더를 만들지 못했습니다.");
+      }
+      setMkdirOpen(false);
+      await loadDirectory();
+    } catch (err) {
+      setError(err.message || "폴더 생성 중 오류가 발생했습니다.");
+    } finally {
+      setMkdirCreating(false);
+    }
+  }
+
   async function executeDelete() {
     const entry = deleteConfirmEntry;
     if (!entry) {
@@ -689,6 +752,13 @@ export default function App() {
       <section className="path-bar">
         <PathBreadcrumb currentPath={currentPath} disabled={loading || uploading} onNavigate={setCurrentPath} />
         <div className="actions">
+          <button
+            type="button"
+            disabled={loading || uploading || mkdirCreating}
+            onClick={openMkdirDialog}
+          >
+            새폴더
+          </button>
           <label className="upload-btn">
             {uploading ? `업로드 중${uploadProgress ? ` (${uploadProgress})` : ""}…` : "파일 업로드"}
             <input type="file" multiple onChange={onUploadChange} disabled={uploading || loading} />
@@ -819,6 +889,58 @@ export default function App() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mkdirOpen && (
+        <div className="mkdir-dialog-backdrop" role="presentation" onClick={closeMkdirDialog}>
+          <div
+            className="mkdir-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mkdir-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="mkdir-dialog-title" className="mkdir-dialog-title">
+              새 폴더
+            </h2>
+            <label className="mkdir-dialog-label" htmlFor="mkdir-name-input">
+              폴더 이름
+            </label>
+            <input
+              id="mkdir-name-input"
+              className="mkdir-dialog-input"
+              type="text"
+              value={mkdirName}
+              autoFocus
+              disabled={mkdirCreating}
+              onChange={(event) => setMkdirName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void createFolder();
+                }
+              }}
+            />
+            <div className="mkdir-dialog-actions">
+              <button
+                type="button"
+                className="mkdir-dialog-cancel"
+                disabled={mkdirCreating}
+                onClick={closeMkdirDialog}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="mkdir-dialog-confirm"
+                disabled={mkdirCreating || !mkdirName.trim()}
+                onClick={() => void createFolder()}
+              >
+                {mkdirCreating ? "만드는 중..." : "확인"}
+              </button>
             </div>
           </div>
         </div>

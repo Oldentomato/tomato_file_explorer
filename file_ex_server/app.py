@@ -109,6 +109,29 @@ async def upload_file(
     return {"message": "uploaded", "path": str(destination.relative_to(ROOT_DIR))}
 
 
+@app.post("/api/mkdir")
+def create_directory(
+    path: str = Query(default="", description="Relative parent directory path under /data"),
+    name: str = Query(..., description="Name of the new directory"),
+) -> dict:
+    parent_dir = safe_target_path(path)
+    if not parent_dir.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+    if not parent_dir.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+
+    folder_name = Path(name).name.strip()
+    if not folder_name or folder_name in {".", ".."} or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid folder name")
+
+    destination = parent_dir / folder_name
+    if destination.exists():
+        raise HTTPException(status_code=409, detail="Already exists")
+
+    destination.mkdir(parents=False, exist_ok=False)
+    return {"message": "created", "path": str(destination.relative_to(ROOT_DIR))}
+
+
 def guess_media_type(file_path: Path) -> str:
     mime, _ = mimetypes.guess_type(str(file_path))
     return mime or "application/octet-stream"
